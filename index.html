@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Earth Curvature & Visibility Calculator</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="stylesheet" href="app.css"/>
+</head>
+<body>
+
+<div id="map-container">
+  <div class="map-hint" id="map-hint">Click map to place Observer</div>
+  <div id="map"></div>
+</div>
+
+<div id="sidebar">
+  <div id="sidebar-scroll">
+    <div id="sidebar-empty">Place an Observer on the map, then click to add Targets</div>
+    <div id="target-cards"></div>
+  </div>
+  <div id="sidebar-add">
+    <button class="add-target-btn" id="btn-add-target">+ Add target (click map)</button>
+  </div>
+</div>
+
+<div id="diagram-container">
+  <canvas id="diagram-canvas"></canvas>
+</div>
+
+<div id="controls">
+  <div class="ctrl-section">
+    <div class="ctrl-section-title">Observer</div>
+    <div class="ctrl-row">
+      <div style="width:9px;height:9px;border-radius:50%;background:#60a5fa;flex-shrink:0"></div>
+      <span class="ctrl-label">Eye height</span>
+      <input class="obs-elev-input" id="obs-elev" type="number" value="2" min="0" max="9000" step="0.5">
+      <span style="font-size:10px;color:#475569">m</span>
+    </div>
+    <div class="ctrl-row">
+      <button class="map-btn" id="btn-reset" style="font-size:11px;padding:4px 10px">Reset</button>
+    </div>
+  </div>
+  <div class="ctrl-section">
+    <div class="ctrl-section-title">Atmosphere</div>
+    <div class="ctrl-row">
+      <span class="ctrl-label">Refraction</span>
+      <select class="refraction-select" id="refraction-preset">
+        <option value="0">None (k = 0)</option>
+        <option value="0.13" selected>Standard (k = 0.13)</option>
+        <option value="0.20">Warm / humid (k = 0.20)</option>
+        <option value="0.25">Superior mirage (k = 0.25)</option>
+        <option value="0.07">Cold water / arctic (k = 0.07)</option>
+      </select>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
