@@ -118,8 +118,9 @@ function placeObserver(latlng) {
     .addTo(map)
     .bindTooltip('Observer', { permanent: false });
   obsMarker.on('drag', () => { observer = obsMarker.getLatLng(); refreshLines(); compute(); });
+  obsMarker.on('dragend', encodeFragment);
   placingObs = false;
-  refreshLines(); compute();
+  refreshLines(); compute(); encodeFragment();
 }
 
 function addTarget(latlng, elev, dim) {
@@ -132,7 +133,8 @@ function addTarget(latlng, elev, dim) {
   const t = { id, lat: latlng.lat, lng: latlng.lng, elev: e, dim: d, color, marker, line: null, labelMarker: null };
   targets.push(t);
   marker.on('drag', () => { t.lat = marker.getLatLng().lat; t.lng = marker.getLatLng().lng; refreshLines(); compute(); });
-  refreshLines(); compute();
+  marker.on('dragend', encodeFragment);
+  refreshLines(); compute(); encodeFragment();
 }
 
 function removeTarget(id) {
@@ -143,7 +145,7 @@ function removeTarget(id) {
   if (t.line) map.removeLayer(t.line);
   if (t.labelMarker) map.removeLayer(t.labelMarker);
   targets.splice(idx, 1);
-  compute();
+  compute(); encodeFragment();
 }
 
 function refreshLines() {
@@ -172,8 +174,8 @@ document.getElementById('btn-add-target').addEventListener('click', () => {
   placingTgt = true;
   updateHint('Click map to place Target');
 });
-document.getElementById('obs-elev').addEventListener('input', () => { obsElev = parseFloat(document.getElementById('obs-elev').value)||0; compute(); });
-document.getElementById('refraction-preset').addEventListener('change', e => { refractionK = parseFloat(e.target.value); compute(); });
+document.getElementById('obs-elev').addEventListener('input', () => { obsElev = parseFloat(document.getElementById('obs-elev').value)||0; compute(); encodeFragment(); });
+document.getElementById('refraction-preset').addEventListener('change', e => { refractionK = parseFloat(e.target.value); compute(); encodeFragment(); });
 
 function updateHint(msg) {
   const el = document.getElementById('map-hint');
@@ -305,14 +307,14 @@ function renderSidebar(results) {
 
 function onTargetElev(el) {
   const t = targets.find(x => x.id === parseInt(el.dataset.id));
-  if (t) { t.elev = parseFloat(el.value)||0; compute(); }
+  if (t) { t.elev = parseFloat(el.value)||0; compute(); encodeFragment(); }
 }
 function onTargetDim(el) {
   const t = targets.find(x => x.id === parseInt(el.dataset.id));
   if (t) {
     t.dim = parseFloat(el.value)||0;
     el.style.color = t.dim ? '#e2e8f0' : '#334155';
-    compute();
+    compute(); encodeFragment();
   }
 }
 
@@ -335,7 +337,6 @@ function compute() {
 
   renderSidebar(results);
   drawDiagram(results, R);
-  encodeFragment();
 }
 
 // ─── Diagram ─────────────────────────────────────────────────────────────────
