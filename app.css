@@ -109,19 +109,6 @@ body {
   z-index: 1000;
   white-space: nowrap;
 }
-.map-btn {
-  background: #1a1d27;
-  border: 1px solid #2d3149;
-  color: #93c5fd;
-  border-radius: 6px;
-  padding: 6px 12px;
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background 0.15s;
-}
-.map-btn:hover { background: #252a3d; }
-
 /* Target cards */
 .tgt-card {
   background: #0f1117;

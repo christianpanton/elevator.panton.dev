@@ -172,15 +172,6 @@ document.getElementById('btn-add-target').addEventListener('click', () => {
   placingTgt = true;
   updateHint('Click map to place Target');
 });
-document.getElementById('btn-reset').addEventListener('click', () => {
-  if (obsMarker) { map.removeLayer(obsMarker); obsMarker = null; }
-  observer = null;
-  targets.forEach(t => { if(t.marker)map.removeLayer(t.marker); if(t.line)map.removeLayer(t.line); if(t.labelMarker)map.removeLayer(t.labelMarker); });
-  targets = [];
-  placingObs = false; placingTgt = false;
-  history.replaceState(null, '', location.pathname);
-  updateHint(); compute();
-});
 document.getElementById('obs-elev').addEventListener('input', () => { obsElev = parseFloat(document.getElementById('obs-elev').value)||0; compute(); });
 document.getElementById('refraction-preset').addEventListener('change', e => { refractionK = parseFloat(e.target.value); compute(); });
 
