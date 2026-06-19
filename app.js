@@ -158,7 +158,7 @@ function refreshLines() {
     const distStr = distM < 1000 ? `${distM.toFixed(0)} m` : `${(distM/1000).toFixed(1)} km`;
     t.labelMarker = L.marker([(observer.lat+t.lat)/2,(observer.lng+t.lng)/2], {
       icon: L.divIcon({
-        html: `<div style="display:inline-block;white-space:nowrap;transform:translateX(-50%);background:rgba(15,17,23,0.88);border:1px solid #2d3149;border-radius:4px;padding:2px 7px;font-size:11px;color:#93c5fd;font-family:system-ui,sans-serif">${distStr}</div>`,
+        html: `<div style="display:inline-block;white-space:nowrap;transform:translateX(-50%);background:rgba(15,17,23,0.88);border:1px solid #2d3149;border-radius:4px;padding:2px 7px;font-size:11px;color:#e2e8f0;font-family:system-ui,sans-serif">${distStr}</div>`,
         className: '', iconAnchor: [0,10],
       }),
       interactive: false,
@@ -464,14 +464,23 @@ function drawDiagram(results, R_eff) {
     // Lines and triangle terminate at the left edge of the target bar
     const tgtX = px(distM) - barW;
 
-    // Triangle fill: observer eye → target top → horizon cutoff (tgt_min)
-    ctx.beginPath();
-    ctx.moveTo(px(0), py(obs_top));
-    ctx.lineTo(tgtX, py(tgt_top));
-    ctx.lineTo(tgtX, py(tgt_min));
-    ctx.closePath();
-    ctx.fillStyle = t.color + '18';
-    ctx.fill();
+    // Triangle fill and solid line to top: only when target has height and top is above horizon
+    if (vis.visible > 0 && t.elev > 0) {
+      ctx.beginPath();
+      ctx.moveTo(px(0), py(obs_top));
+      ctx.lineTo(tgtX, py(tgt_top));
+      ctx.lineTo(tgtX, py(tgt_min));
+      ctx.closePath();
+      ctx.fillStyle = t.color + '18';
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.moveTo(px(0), py(obs_top));
+      ctx.lineTo(tgtX, py(tgt_top));
+      ctx.strokeStyle = t.color + 'aa';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
 
     // Line of sight to horizon cutoff (dashed)
     ctx.beginPath();
@@ -480,14 +489,6 @@ function drawDiagram(results, R_eff) {
     ctx.strokeStyle = t.color + '70';
     ctx.lineWidth = 1.5;
     ctx.setLineDash([5,4]); ctx.stroke(); ctx.setLineDash([]);
-
-    // Line of sight to target top (solid)
-    ctx.beginPath();
-    ctx.moveTo(px(0), py(obs_top));
-    ctx.lineTo(tgtX, py(tgt_top));
-    ctx.strokeStyle = t.color + 'aa';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
 
     // Hidden bar
     if (vis.h_min > 0 && t.elev > 0) {
@@ -525,7 +526,7 @@ function drawDiagram(results, R_eff) {
   });
 
   // X-axis labels: show each target distance
-  ctx.fillStyle = '#2a3a50'; ctx.font = '9px system-ui'; ctx.textAlign = 'center';
+  ctx.fillStyle = '#64748b'; ctx.font = '9px system-ui'; ctx.textAlign = 'center';
   ctx.fillText('0', px(0), H - 4);
   const shown = new Set();
   results.forEach(r => {
