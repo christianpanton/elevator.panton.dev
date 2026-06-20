@@ -86,7 +86,7 @@ import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.165.0/+esm';
   }
 
   function rebuildScene() {
-    if (!initialized) return;
+    if (!initialized || !lastResults || !lastResults.length) return;
     buildScene(lastResults, lastObserver, lastObsElev, lastR, lastGrid, lastInnerGrid);
   }
 
@@ -181,7 +181,7 @@ import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.165.0/+esm';
     fetchSatelliteTexture(observer.lat, observer.lng).then(() => {
       pendingSatFetch = false;
       setSatLoadingUI(false);
-      rebuildScene();
+      if (lastResults && lastResults.length) rebuildScene();
     });
   }
 
@@ -590,7 +590,8 @@ import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.165.0/+esm';
         pendingGridFetch = true;
         fetchTerrainGrid(observer.lat, observer.lng).then(grid => {
           pendingGridFetch = false;
-          if (lastObserver === observer) buildScene(lastResults, lastObserver, lastObsElev, lastR, grid, lastInnerGrid);
+          if (lastObserver === observer && lastResults && lastResults.length)
+            buildScene(lastResults, lastObserver, lastObsElev, lastR, grid, lastInnerGrid);
         });
       }
 
@@ -603,7 +604,8 @@ import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.165.0/+esm';
         pendingInnerFetch = true;
         fetchInnerGrid(observer.lat, observer.lng).then(inner => {
           pendingInnerFetch = false;
-          if (lastObserver === observer) buildScene(lastResults, lastObserver, lastObsElev, lastR, lastGrid, inner);
+          if (lastObserver === observer && lastResults && lastResults.length)
+            buildScene(lastResults, lastObserver, lastObsElev, lastR, lastGrid, inner);
         });
       }
     }
