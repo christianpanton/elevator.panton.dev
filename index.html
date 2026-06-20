@@ -39,6 +39,18 @@
     </div>
   </div>
   <div class="ctrl-section">
+    <div class="ctrl-section-title">Terrain (DK only)</div>
+    <div class="ctrl-row">
+      <span class="ctrl-label">Resolution</span>
+      <select class="refraction-select" id="terrain-res">
+        <option value="0">Off</option>
+        <option value="256">Low</option>
+        <option value="1024">High</option>
+      </select>
+      <span id="terrain-status" style="font-size:10px;color:#475569;margin-left:4px"></span>
+    </div>
+  </div>
+  <div class="ctrl-section">
     <div class="ctrl-section-title">Atmosphere</div>
     <div class="ctrl-row">
       <span class="ctrl-label">Refraction</span>
@@ -54,6 +66,7 @@
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/geotiff@2.1.3/dist-browser/geotiff.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

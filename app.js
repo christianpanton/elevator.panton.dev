@@ -49,6 +49,117 @@ let observer = null, obsMarker = null, obsElev = 2;
 let targets = [], nextId = 1, placingObs = false, placingTgt = false;
 let refractionK = 0.13;
 
+// ─── Terrain ─────────────────────────────────────────────────────────────────
+const DHM_TOKEN = '488878ac3336e6d87781f9e09c91a296';
+const DHM_WCS   = 'https://api.dataforsyningen.dk/dhm_wcs_DAF';
+let terrainRes = 0; // 0=off, 128=low, 512=high
+let isDragging = false;
+let computeSeq = 0;
+const terrainCache = new Map();
+
+// Denmark bounding box (loose) for fast skip
+const DK_BBOX = { latMin: 54.4, latMax: 57.8, lonMin: 8.0, lonMax: 15.6 };
+function inDenmark(lat, lon) {
+  return lat > DK_BBOX.latMin && lat < DK_BBOX.latMax && lon > DK_BBOX.lonMin && lon < DK_BBOX.lonMax;
+}
+
+function latLonToUTM32(lat, lon) {
+  const { a, f } = WGS84;
+  const e2 = 2*f - f*f, e2p = e2/(1-e2);
+  const k0 = 0.9996, lon0 = 9*Math.PI/180;
+  const φ = lat*Math.PI/180, λ = lon*Math.PI/180, Δλ = λ - lon0;
+  const N = a/Math.sqrt(1 - e2*Math.sin(φ)**2);
+  const T = Math.tan(φ)**2, C = e2p*Math.cos(φ)**2, A = Math.cos(φ)*Δλ;
+  const M = a*(
+    (1 - e2/4 - 3*e2**2/64 - 5*e2**3/256)*φ
+    - (3*e2/8 + 3*e2**2/32 + 45*e2**3/1024)*Math.sin(2*φ)
+    + (15*e2**2/256 + 45*e2**3/1024)*Math.sin(4*φ)
+    - 35*e2**3/3072*Math.sin(6*φ)
+  );
+  const x = 500000 + k0*N*(A + (1-T+C)*A**3/6 + (5-18*T+T**2+72*C-58*e2p)*A**5/120);
+  const y = k0*(M + N*Math.tan(φ)*(A**2/2 + (5-T+9*C+4*C**2)*A**4/24 + (61-58*T+T**2+600*C-330*e2p)*A**6/720));
+  return { x, y };
+}
+
+async function fetchTerrainProfile(lat1, lon1, lat2, lon2) {
+  if (!terrainRes || (!inDenmark(lat1, lon1) && !inDenmark(lat2, lon2))) return null;
+  const key = `${r5(lat1)},${r5(lon1)},${r5(lat2)},${r5(lon2)}`;
+  if (terrainCache.has(key)) return terrainCache.get(key);
+
+  const p1 = latLonToUTM32(lat1, lon1);
+  const p2 = latLonToUTM32(lat2, lon2);
+  const pad = 200;
+  const xmin = Math.min(p1.x, p2.x) - pad, xmax = Math.max(p1.x, p2.x) + pad;
+  const ymin = Math.min(p1.y, p2.y) - pad, ymax = Math.max(p1.y, p2.y) + pad;
+  const aspect = (xmax - xmin) / (ymax - ymin);
+  const W = aspect >= 1 ? terrainRes : Math.max(64, Math.round(terrainRes * aspect));
+  const H = aspect >= 1 ? Math.max(64, Math.round(terrainRes / aspect)) : terrainRes;
+
+  const url = `${DHM_WCS}?service=WCS&version=1.0.0&request=GetCoverage` +
+    `&coverage=dhm_terraen&bbox=${xmin},${ymin},${xmax},${ymax}` +
+    `&width=${W}&height=${H}&crs=EPSG:25832&format=GTiff&token=${DHM_TOKEN}`;
+
+  let result = null;
+  try {
+    setTerrainStatus('loading');
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`WCS ${resp.status}`);
+    const buf = await resp.arrayBuffer();
+    const tiff = await GeoTIFF.fromArrayBuffer(buf);
+    const img  = await tiff.getImage();
+    const [rasterData] = await img.readRasters();
+    const imgW = img.getWidth(), imgH = img.getHeight();
+    const [bxmin, bymin, bxmax, bymax] = img.getBoundingBox();
+    const rx = (bxmax - bxmin) / imgW, ry = (bymax - bymin) / imgH;
+
+    const readZ = (ux, uy) => {
+      const col = Math.round((ux - bxmin) / rx);
+      const row = Math.round((bymax - uy) / ry);
+      if (col < 0 || col >= imgW || row < 0 || row >= imgH) return null;
+      const v = rasterData[row * imgW + col];
+      return (!isNaN(v) && v > -100) ? v : null;
+    };
+
+    // 120 samples, t^1.5 spacing → denser near observer
+    const N = 120;
+    const profile = [];
+    for (let i = 0; i <= N; i++) {
+      const t = i === 0 ? 0 : i === N ? 1 : Math.pow(i / N, 1.5);
+      profile.push({ t, z: readZ(p1.x + t*(p2.x - p1.x), p1.y + t*(p2.y - p1.y)) });
+    }
+
+    result = { profile, zObs: profile[0].z ?? 0, zTgt: profile[N].z ?? 0 };
+    setTerrainStatus('ok');
+  } catch(e) {
+    console.warn('DHM fetch failed:', e);
+    setTerrainStatus('err');
+  }
+
+  terrainCache.set(key, result);
+  return result;
+}
+
+function calcTerrainHmin(profile, obsEyeMSL, distM, R) {
+  let hmin = 0, blockingT = 0;
+  for (const s of profile) {
+    if (s.z === null || s.t <= 0 || s.t >= 1) continue;
+    const x = s.t * distM;
+    // terrain absolute height in chord frame = sagitta + MSL elevation
+    const terrainChordY = x * (distM - x) / (2 * R) + s.z;
+    // minimum target MSL height to see over this terrain point
+    const required = obsEyeMSL + (terrainChordY - obsEyeMSL) * distM / x;
+    if (required > hmin) { hmin = required; blockingT = s.t; }
+  }
+  return { hmin: Math.max(0, hmin), blockingT };
+}
+
+function setTerrainStatus(state) {
+  const el = document.getElementById('terrain-status');
+  if (!el) return;
+  el.textContent = state === 'loading' ? 'fetching…' : state === 'ok' ? 'loaded' : 'unavailable';
+  el.style.color  = state === 'ok' ? '#34d399' : state === 'err' ? '#f87171' : '#94a3b8';
+}
+
 // ─── Fragment state ──────────────────────────────────────────────────────────
 function r5(n) { return Math.round(n * 1e5) / 1e5; }
 
@@ -68,6 +179,7 @@ function encodeFragment() {
   state.c = [r5(c.lat), r5(c.lng), map.getZoom()];
   if (observer) state.o = [r5(observer.lat), r5(observer.lng), obsElev];
   if (refractionK !== 0.13) state.k = refractionK;
+  if (terrainRes) state.r = terrainRes;
   if (targets.length) state.t = targets.map(t => {
     const row = [r5(t.lat), r5(t.lng), t.elev];
     if (t.dim) row.push(t.dim);
@@ -117,9 +229,11 @@ function placeObserver(latlng) {
   obsMarker = L.marker(latlng, { icon: makeObsIcon(), draggable: true, zIndexOffset: 100 })
     .addTo(map)
     .bindTooltip('Observer', { permanent: false });
+  obsMarker.on('dragstart', () => { isDragging = true; });
   obsMarker.on('drag', () => { observer = obsMarker.getLatLng(); refreshLines(); compute(); });
-  obsMarker.on('dragend', encodeFragment);
+  obsMarker.on('dragend', () => { isDragging = false; terrainCache.clear(); encodeFragment(); compute(); });
   placingObs = false;
+  terrainCache.clear();
   refreshLines(); compute(); encodeFragment();
 }
 
@@ -132,8 +246,10 @@ function addTarget(latlng, elev, dim) {
     .addTo(map);
   const t = { id, lat: latlng.lat, lng: latlng.lng, elev: e, dim: d, color, marker, line: null, labelMarker: null };
   targets.push(t);
+  marker.on('dragstart', () => { isDragging = true; });
   marker.on('drag', () => { t.lat = marker.getLatLng().lat; t.lng = marker.getLatLng().lng; refreshLines(); compute(); });
-  marker.on('dragend', encodeFragment);
+  marker.on('dragend', () => { isDragging = false; terrainCache.clear(); encodeFragment(); compute(); });
+  terrainCache.clear();
   refreshLines(); compute(); encodeFragment();
 }
 
@@ -176,6 +292,12 @@ document.getElementById('btn-add-target').addEventListener('click', () => {
 });
 document.getElementById('obs-elev').addEventListener('input', () => { obsElev = parseFloat(document.getElementById('obs-elev').value)||0; compute(); encodeFragment(); });
 document.getElementById('refraction-preset').addEventListener('change', e => { refractionK = parseFloat(e.target.value); compute(); encodeFragment(); });
+document.getElementById('terrain-res').addEventListener('change', e => {
+  terrainRes = parseInt(e.target.value);
+  terrainCache.clear();
+  if (!terrainRes) setTerrainStatus('');
+  compute();
+});
 
 function updateHint(msg) {
   const el = document.getElementById('map-hint');
@@ -201,14 +323,18 @@ function fmtDeg(d) {
 }
 
 function statsHTML(r) {
-  const { t, distM, vis } = r;
-  const objSize  = t.dim > 0 ? t.dim : null;
-  const elevMm   = Math.round(Math.tan(vis.elevDeg * Math.PI / 180) * 1000);
-  const refMm    = (objSize && distM > 0) ? Math.round(objSize / distM * 1000) : null;
-  const visClass = vis.visible === 0 ? 'bad' : vis.hidden > 0 ? 'warn' : 'good';
-  const visText  = vis.visible === 0 ? 'Hidden' : vis.hidden > 0 ? 'Partial' : 'Full view';
-  const hidden_pct  = t.elev > 0 ? `${(vis.hidden / t.elev * 100).toFixed(0)}%` : '0%';
-  const visible_pct = t.elev > 0 ? `${(vis.visible / t.elev * 100).toFixed(0)}%` : '100%';
+  const { t, distM, vis, terrain } = r;
+  const zTgt         = terrain?.zTgt ?? 0;
+  const physH        = t.elev;  // elev is height above terrain
+  const hMinAbove    = Math.max(0, vis.h_min - zTgt);
+  const objSize      = t.dim > 0 ? t.dim : null;
+  const elevMm       = Math.round(Math.tan(vis.elevDeg * Math.PI / 180) * 1000);
+  const refMm        = (objSize && distM > 0) ? Math.round(objSize / distM * 1000) : null;
+  const visClass     = vis.visible === 0 ? 'bad' : vis.hidden > 0 ? 'warn' : 'good';
+  const visText      = vis.visible === 0 ? 'Hidden' : vis.hidden > 0 ? 'Partial' : 'Full view';
+  const hidden_pct   = physH > 0 ? `${(vis.hidden / physH * 100).toFixed(0)}%` : '0%';
+  const visible_pct  = physH > 0 ? `${(vis.visible / physH * 100).toFixed(0)}%` : '100%';
+  const hMinLabel    = vis.terrainLimited ? 'Min visible ht ▲terrain' : 'Min visible ht';
   return `
     <div class="stat-item stat-full">
       <div class="stat-name">Distance</div>
@@ -223,8 +349,8 @@ function statsHTML(r) {
       <div class="stat-val">${fmt(vis.D_tgt)}</div>
     </div>
     <div class="stat-item">
-      <div class="stat-name">Min visible ht</div>
-      <div class="stat-val">${fmt(vis.h_min)}</div>
+      <div class="stat-name">${hMinLabel}</div>
+      <div class="stat-val">${fmt(hMinAbove)} above ground</div>
     </div>
     <div class="stat-item">
       <div class="stat-name">Hidden</div>
@@ -256,7 +382,6 @@ function renderSidebar(results) {
   }
   empty.style.display = 'none';
 
-  // Rebuild card shells only when the target list changes (add/remove)
   const currentIds = [...cardsEl.querySelectorAll('.tgt-card')].map(c => c.dataset.id).join(',');
   const newIds = results.map(r => String(r.t.id)).join(',');
   if (currentIds !== newIds) {
@@ -275,11 +400,11 @@ function renderSidebar(results) {
         </div>
         <div class="tgt-inputs">
           <div class="tgt-input-cell">
-            <div class="tgt-input-label">Top elevation</div>
+            <div class="tgt-input-label">Height above terrain</div>
             <div class="tgt-input-row">
               <input class="elev-input" type="number" value="${t.elev}" min="0" max="30000" step="1"
                 data-id="${t.id}" data-field="elev" oninput="onTargetElev(this)">
-              <span class="elev-unit">m ASL</span>
+              <span class="elev-unit">m</span>
             </div>
           </div>
           <div class="tgt-input-cell">
@@ -298,7 +423,6 @@ function renderSidebar(results) {
     });
   }
 
-  // Always update stats in-place — never touches the input elements
   results.forEach(r => {
     const statsEl = cardsEl.querySelector(`.tgt-stats[data-id="${r.t.id}"]`);
     if (statsEl) statsEl.innerHTML = statsHTML(r);
@@ -319,7 +443,8 @@ function onTargetDim(el) {
 }
 
 // ─── Compute ─────────────────────────────────────────────────────────────────
-function compute() {
+async function compute() {
+  const seq = ++computeSeq;
   obsElev = parseFloat(document.getElementById('obs-elev').value)||0;
   const hasData = observer && targets.length > 0;
 
@@ -329,12 +454,41 @@ function compute() {
   const k = refractionK;
   const R = R_geom / (1-k);
 
+  // Immediate render with smooth-Earth
   const results = targets.map(t => {
     const distM = vincenty(observer.lat, observer.lng, t.lat, t.lng);
-    const vis = calcVisibility(obsElev, t.elev, distM, R);
-    return { t, distM, vis };
+    const vis   = calcVisibility(obsElev, t.elev, distM, R);
+    return { t, distM, vis, terrain: null };
   });
+  renderSidebar(results);
+  drawDiagram(results, R);
 
+  if (!terrainRes || isDragging) return;
+
+  // Terrain phase — fetch all in parallel
+  await Promise.all(results.map(async r => {
+    const terrain = await fetchTerrainProfile(observer.lat, observer.lng, r.t.lat, r.t.lng);
+    if (!terrain) return;
+    r.terrain = terrain;
+
+    const h_o_eff  = terrain.zObs + obsElev;
+    const zTgt     = terrain.zTgt;
+    const h_t_msl  = r.t.elev + zTgt;
+    const vis = calcVisibility(h_o_eff, h_t_msl, r.distM, R);
+
+    const { hmin: th, blockingT } = calcTerrainHmin(terrain.profile, h_o_eff, r.distM, R);
+    if (th > vis.h_min) {
+      vis.h_min = th;
+      vis.terrainLimited = true;
+      vis.blockingT = blockingT;
+    }
+
+    vis.hidden  = Math.max(0, Math.min(h_t_msl, vis.h_min) - zTgt);
+    vis.visible = Math.max(0, h_t_msl - Math.max(zTgt, vis.h_min));
+    r.vis = vis;
+  }));
+
+  if (seq !== computeSeq) return;
   renderSidebar(results);
   drawDiagram(results, R);
 }
@@ -359,41 +513,50 @@ function drawDiagram(results, R_eff) {
   }
 
   const R = R_eff;
-
-  // Chord frame: both surface endpoints at y=0, Earth humps upward between them.
-  // earth_y(x) = x*(maxDist-x)/(2R)  — parabolic sagitta above chord.
   const maxDist = Math.max(...results.map(r => r.distM));
   const earth_y = x => x * (maxDist - x) / (2 * R);
-  const peakBulge = maxDist * maxDist / (8 * R); // midpoint hump height
+  const peakBulge = maxDist * maxDist / (8 * R);
 
-  // maxH: accommodate observer elevation, all target tops above their chord-frame surface,
-  // all h_min values above their chord-frame surface, and the midpoint bulge itself.
+  // Observer terrain elevation (use first available terrain)
+  const zObs = results.find(r => r.terrain)?.terrain.zObs ?? 0;
+  const obs_earth = zObs;
+  const obs_top   = zObs + obsElev;
+
+  // Terrain height extent for scale
+  let terrainMaxH = obs_top;
+  results.forEach(r => {
+    if (!r.terrain) return;
+    r.terrain.profile.forEach(s => {
+      if (s.z === null) return;
+      const h = earth_y(s.t * r.distM) + s.z;
+      if (h > terrainMaxH) terrainMaxH = h;
+    });
+  });
+
   const maxH = Math.max(
-    obsElev,                                               // observer above chord at x=0
-    peakBulge,                                             // hump itself
-    ...results.map(r => earth_y(r.distM) + r.t.elev),     // target tops
-    ...results.map(r => earth_y(r.distM) + r.vis.h_min),  // h_min points
+    terrainMaxH,
+    peakBulge,
+    ...results.map(r => earth_y(r.distM) + r.t.elev),
+    ...results.map(r => earth_y(r.distM) + r.vis.h_min),
     1
   ) * 1.4;
 
   const pad = { l: 20, r: 20, t: 16, b: 10 };
   const plotW = W - pad.l - pad.r;
   const plotH = H - pad.t - pad.b;
-  // Horizontal inset: keep curve endpoints away from left/right edges
   const hInset = plotW * 0.06;
   const px = x => pad.l + hInset + x/maxDist * (plotW - 2*hInset);
-  // Vertical padding below y=0 (chord baseline) so endpoints don't sit at canvas bottom
   const yBelowPad = maxH * 0.12;
   const yRange = maxH + yBelowPad;
   const py = y => pad.t + plotH - (y + yBelowPad) / yRange * plotH;
 
-  // Sky — fill full canvas so no strips show through at edges
+  // Sky
   const sky = ctx.createLinearGradient(0, 0, 0, H);
   sky.addColorStop(0, '#071020'); sky.addColorStop(1, '#0c1a30');
   ctx.fillStyle = sky;
   ctx.fillRect(0, 0, W, H);
 
-  // Arc extends from canvas left edge to right edge (beyond hInset padding)
+  // Arc geometry
   const steps = 300;
   const extraX_l = (pad.l + hInset) * maxDist / (plotW - 2 * hInset);
   const extraX_r = (pad.r + hInset) * maxDist / (plotW - 2 * hInset);
@@ -408,13 +571,13 @@ function drawDiagram(results, R_eff) {
     if (close) { ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath(); }
   }
 
-  // Earth fill — close at full canvas bottom
+  // Earth fill
   drawEarthArc(true);
   const eg = ctx.createLinearGradient(0, pad.t + plotH*0.4, 0, H);
   eg.addColorStop(0, '#182840'); eg.addColorStop(1, '#0c1828');
   ctx.fillStyle = eg; ctx.fill();
 
-  // Hatching inside the Earth
+  // Earth hatching
   ctx.save();
   drawEarthArc(true);
   ctx.clip();
@@ -423,20 +586,62 @@ function drawDiagram(results, R_eff) {
   const hs = 10;
   const hx0 = 0, hx1 = W, hy0 = py(peakBulge), hy1 = H;
   for (let s = hx0 - (hy1 - hy0); s < hx1 + (hy1 - hy0); s += hs) {
-    ctx.beginPath();
-    ctx.moveTo(s, hy1);
-    ctx.lineTo(s + (hy1 - hy0), hy0);
-    ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(s, hy1); ctx.lineTo(s + (hy1 - hy0), hy0); ctx.stroke();
   }
   ctx.restore();
 
-  // Earth surface line — also extended into inset zones
+  // Earth surface line
   drawEarthArc(false);
   ctx.strokeStyle = '#3a5a90'; ctx.lineWidth = 1.5; ctx.stroke();
 
-  // Observer post — surface is at chord level (y=0) at x=0
-  const obs_earth = 0;
-  const obs_top   = obsElev;
+  // ── Terrain profiles ──────────────────────────────────────────────────────
+  results.forEach(r => {
+    if (!r.terrain) return;
+    const { profile } = r.terrain;
+    const distM = r.distM;
+
+    // Build terrain polyline points (only where z is valid)
+    const pts = profile.filter(s => s.z !== null).map(s => ({
+      x: s.t * distM, y: earth_y(s.t * distM) + s.z,
+    }));
+    if (pts.length < 2) return;
+
+    // Terrain fill (above earth arc)
+    ctx.beginPath();
+    ctx.moveTo(px(pts[0].x), py(pts[0].y));
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(px(pts[i].x), py(pts[i].y));
+    // Close back along earth arc
+    for (let i = pts.length - 1; i >= 0; i--) ctx.lineTo(px(pts[i].x), py(earth_y(pts[i].x)));
+    ctx.closePath();
+    const tg = ctx.createLinearGradient(0, py(terrainMaxH), 0, py(0));
+    tg.addColorStop(0, 'rgba(70,110,55,0.55)');
+    tg.addColorStop(1, 'rgba(45,75,35,0.35)');
+    ctx.fillStyle = tg;
+    ctx.fill();
+
+    // Terrain surface line
+    ctx.beginPath();
+    ctx.moveTo(px(pts[0].x), py(pts[0].y));
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(px(pts[i].x), py(pts[i].y));
+    ctx.strokeStyle = 'rgba(110,160,80,0.75)';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    // Blocking terrain peak marker
+    if (r.vis.terrainLimited && r.vis.blockingT != null) {
+      const bx = r.vis.blockingT * distM;
+      const bsam = profile.reduce((best, s) =>
+        s.z !== null && Math.abs(s.t - r.vis.blockingT) < Math.abs((best?.t ?? 1) - r.vis.blockingT) ? s : best, null);
+      if (bsam?.z != null) {
+        const by = earth_y(bx) + bsam.z;
+        ctx.beginPath(); ctx.arc(px(bx), py(by), 4, 0, Math.PI*2);
+        ctx.fillStyle = '#fbbf24'; ctx.fill();
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
+      }
+    }
+  });
+
+  // Observer post
   ctx.beginPath();
   ctx.moveTo(px(0), py(obs_earth)); ctx.lineTo(px(0), py(obs_top));
   ctx.strokeStyle = '#60a5fa'; ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.stroke(); ctx.lineCap = 'butt';
@@ -446,7 +651,7 @@ function drawDiagram(results, R_eff) {
   ctx.fillText('Obs', px(0)+7, py(obs_top)-3);
 
   // Observer horizon tangent point
-  const D_obs = Math.sqrt(2*R*obsElev);
+  const D_obs = Math.sqrt(2*R*obs_top);
   if (D_obs < maxDist) {
     const hy = earth_y(D_obs);
     ctx.beginPath(); ctx.arc(px(D_obs), py(hy), 3, 0, Math.PI*2);
@@ -457,15 +662,15 @@ function drawDiagram(results, R_eff) {
   const barW = Math.max(5, Math.min(10, plotW / results.length / 8));
   results.forEach((r, i) => {
     const { t, distM, vis } = r;
-    // In chord frame: target's surface is at earth_y(distM) above the chord baseline
-    const tgt_earth = earth_y(distM); // = 0 for the longest target, > 0 for closer ones
-    const tgt_top   = tgt_earth + t.elev;
-    const tgt_min   = tgt_earth + vis.h_min;
+    const zTgt       = r.terrain?.zTgt ?? 0;
+    const tgt_earth   = earth_y(distM);
+    const tgt_terrain = tgt_earth + zTgt;
+    const tgt_top     = tgt_terrain + t.elev;   // elev is above terrain
+    const tgt_min     = tgt_earth + vis.h_min;  // h_min is MSL
 
-    // Lines and triangle terminate at the left edge of the target bar
     const tgtX = px(distM) - barW;
 
-    // Triangle fill and solid line to top: only when target has height and top is above horizon
+    // Solid sight line to top (visible portion)
     if (vis.visible > 0 && t.elev > 0) {
       ctx.beginPath();
       ctx.moveTo(px(0), py(obs_top));
@@ -483,7 +688,7 @@ function drawDiagram(results, R_eff) {
       ctx.stroke();
     }
 
-    // Line of sight to horizon cutoff (dashed)
+    // Dashed line of sight to h_min
     ctx.beginPath();
     ctx.moveTo(px(0), py(obs_top));
     ctx.lineTo(tgtX, py(tgt_min));
@@ -491,13 +696,13 @@ function drawDiagram(results, R_eff) {
     ctx.lineWidth = 1.5;
     ctx.setLineDash([5,4]); ctx.stroke(); ctx.setLineDash([]);
 
-    // Hidden bar
+    // Hidden bar (terrain to h_min)
     if (vis.h_min > 0 && t.elev > 0) {
       const topY = Math.min(tgt_min, tgt_top);
       ctx.fillStyle = '#7f1d1d80';
-      ctx.fillRect(px(distM)-barW, py(topY), barW*2, py(tgt_earth)-py(topY));
+      ctx.fillRect(px(distM)-barW, py(topY), barW*2, py(tgt_terrain)-py(topY));
       ctx.strokeStyle = '#f8717190'; ctx.lineWidth = 1;
-      ctx.strokeRect(px(distM)-barW, py(topY), barW*2, py(tgt_earth)-py(topY));
+      ctx.strokeRect(px(distM)-barW, py(topY), barW*2, py(tgt_terrain)-py(topY));
     }
 
     // Visible bar
@@ -508,25 +713,26 @@ function drawDiagram(results, R_eff) {
       ctx.strokeRect(px(distM)-barW, py(tgt_top), barW*2, py(tgt_min)-py(tgt_top));
     } else if (t.elev > 0) {
       ctx.fillStyle = '#7f1d1daa';
-      ctx.fillRect(px(distM)-barW, py(tgt_top), barW*2, py(tgt_earth)-py(tgt_top));
+      ctx.fillRect(px(distM)-barW, py(tgt_top), barW*2, py(tgt_terrain)-py(tgt_top));
       ctx.strokeStyle = '#f87171'; ctx.lineWidth = 2;
-      ctx.strokeRect(px(distM)-barW, py(tgt_top), barW*2, py(tgt_earth)-py(tgt_top));
+      ctx.strokeRect(px(distM)-barW, py(tgt_top), barW*2, py(tgt_terrain)-py(tgt_top));
     }
 
-    // Label
+    // Target label
     ctx.fillStyle = t.color;
     ctx.font = 'bold 9px system-ui'; ctx.textAlign = 'center';
     ctx.fillText(`T${i+1}`, px(distM), py(tgt_top) - 5);
 
-    // Min visible annotation
-    if (vis.h_min > 0) {
-      ctx.fillStyle = '#f8717188';
+    // h_min annotation (height above target terrain)
+    if (vis.h_min > zTgt) {
+      const hMinAbove = vis.h_min - zTgt;
+      ctx.fillStyle = vis.terrainLimited ? '#fbbf2488' : '#f8717188';
       ctx.font = '8px system-ui'; ctx.textAlign = 'left';
-      ctx.fillText(`▲${fmt(vis.h_min)}`, px(distM)+barW+3, py(tgt_min)+4);
+      ctx.fillText(`▲${fmt(hMinAbove)}`, px(distM)+barW+3, py(tgt_min)+4);
     }
   });
 
-  // X-axis labels: show each target distance
+  // X-axis labels
   ctx.fillStyle = '#64748b'; ctx.font = '9px system-ui'; ctx.textAlign = 'center';
   ctx.fillText('0', px(0), H - 4);
   const shown = new Set();
@@ -549,6 +755,10 @@ requestAnimationFrame(() => {
     if (_saved.k !== undefined) {
       refractionK = _saved.k;
       document.getElementById('refraction-preset').value = String(refractionK);
+    }
+    if (_saved.r) {
+      terrainRes = _saved.r;
+      document.getElementById('terrain-res').value = String(terrainRes);
     }
     if (_saved.o) {
       obsElev = _saved.o[2];
