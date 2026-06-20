@@ -31,6 +31,14 @@ function vincenty(lat1, lon1, lat2, lon2) {
   return b*A*(σ-Δσ);
 }
 
+function bearingTo(lat1, lon1, lat2, lon2) {
+  const φ1 = lat1 * Math.PI/180, φ2 = lat2 * Math.PI/180;
+  const Δλ = (lon2 - lon1) * Math.PI/180;
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x = Math.cos(φ1)*Math.sin(φ2) - Math.sin(φ1)*Math.cos(φ2)*Math.cos(Δλ);
+  return (Math.atan2(y, x) * 180/Math.PI + 360) % 360;
+}
+
 // ─── Core geometry ───────────────────────────────────────────────────────────
 function calcVisibility(h_o, h_t, distM, R) {
   const D_obs = Math.sqrt(2*R*h_o);
@@ -96,13 +104,18 @@ async function fetchTerrainProfile(lat1, lon1, lat2, lon2) {
   const H = aspect >= 1 ? Math.max(64, Math.round(terrainRes / aspect)) : terrainRes;
 
   const url = `${DHM_WCS}?service=WCS&version=1.0.0&request=GetCoverage` +
-    `&coverage=dhm_terraen&bbox=${xmin},${ymin},${xmax},${ymax}` +
+    `&coverage=dhm_overflade&bbox=${xmin},${ymin},${xmax},${ymax}` +
     `&width=${W}&height=${H}&crs=EPSG:25832&format=GTiff&token=${DHM_TOKEN}`;
 
   let result = null;
   try {
     setTerrainStatus('loading');
-    const resp = await fetch(url);
+    let resp;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      resp = await fetch(url);
+      if (resp.status !== 504) break;
+      await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
+    }
     if (!resp.ok) throw new Error(`WCS ${resp.status}`);
     const buf = await resp.arrayBuffer();
     const tiff = await GeoTIFF.fromArrayBuffer(buf);
@@ -194,10 +207,15 @@ const _initCenter = _saved?.c ? [_saved.c[0], _saved.c[1]] : [55.6761, 12.5683];
 const _initZoom   = _saved?.c ? _saved.c[2] : 7;
 
 const map = L.map('map', { center: _initCenter, zoom: _initZoom, zoomControl: false });
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+const _osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
   maxZoom: 19,
-}).addTo(map);
+});
+const _satLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+  attribution: '© Esri &mdash; Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP',
+  maxZoom: 19,
+});
+_osmLayer.addTo(map);
 L.control.zoom({ position: 'bottomright' }).addTo(map);
 
 map.on('moveend', encodeFragment);
@@ -297,6 +315,7 @@ document.getElementById('terrain-res').addEventListener('change', e => {
   terrainCache.clear();
   if (!terrainRes) setTerrainStatus('');
   compute();
+  encodeFragment();
 });
 
 function updateHint(msg) {
@@ -448,7 +467,7 @@ async function compute() {
   obsElev = parseFloat(document.getElementById('obs-elev').value)||0;
   const hasData = observer && targets.length > 0;
 
-  if (!hasData) { renderSidebar(null); drawDiagram(null); return; }
+  if (!hasData) { renderSidebar(null); drawDiagram(null); if (window.View3D) window.View3D.update(null, observer, 0, 0); return; }
 
   const R_geom = earthRadiusAt(observer.lat);
   const k = refractionK;
@@ -456,12 +475,14 @@ async function compute() {
 
   // Immediate render with smooth-Earth
   const results = targets.map(t => {
-    const distM = vincenty(observer.lat, observer.lng, t.lat, t.lng);
-    const vis   = calcVisibility(obsElev, t.elev, distM, R);
-    return { t, distM, vis, terrain: null };
+    const distM   = vincenty(observer.lat, observer.lng, t.lat, t.lng);
+    const bearing = bearingTo(observer.lat, observer.lng, t.lat, t.lng);
+    const vis     = calcVisibility(obsElev, t.elev, distM, R);
+    return { t, distM, bearing, vis, terrain: null };
   });
   renderSidebar(results);
   drawDiagram(results, R);
+  if (window.View3D) window.View3D.update(results, observer, obsElev, R);
 
   if (!terrainRes || isDragging) return;
 
@@ -491,6 +512,7 @@ async function compute() {
   if (seq !== computeSeq) return;
   renderSidebar(results);
   drawDiagram(results, R);
+  if (window.View3D) window.View3D.update(results, observer, obsElev, R);
 }
 
 // ─── Diagram ─────────────────────────────────────────────────────────────────
@@ -771,4 +793,31 @@ requestAnimationFrame(() => {
   }
   updateHint();
   compute();
+});
+
+// ─── View tab switching ───────────────────────────────────────────────────────
+document.querySelectorAll('.view-tab[data-tab]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const tab = btn.dataset.tab;
+    document.querySelectorAll('.view-tab[data-tab]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    if (tab === 'map') {
+      document.getElementById('map').style.display = '';
+      document.getElementById('view3d-container').style.display = 'none';
+      map.invalidateSize();
+    } else {
+      document.getElementById('map').style.display = 'none';
+      document.getElementById('view3d-container').style.display = 'block';
+      if (window.View3D) window.View3D.resize();
+    }
+  });
+});
+
+// ─── Satellite toggle ─────────────────────────────────────────────────────────
+document.getElementById('satellite-btn').addEventListener('click', () => {
+  const btn    = document.getElementById('satellite-btn');
+  const active = btn.classList.toggle('active');
+  if (active) { map.removeLayer(_osmLayer); _satLayer.addTo(map); }
+  else        { map.removeLayer(_satLayer); _osmLayer.addTo(map); }
+  if (window.View3D) window.View3D.setSatellite(active);
 });
