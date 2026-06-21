@@ -1,5 +1,8 @@
 name = "elevator"
 compatibility_date = "2025-01-01"
 
+[build]
+command = "node build.mjs"
+
 [assets]
 directory = "./dist"
